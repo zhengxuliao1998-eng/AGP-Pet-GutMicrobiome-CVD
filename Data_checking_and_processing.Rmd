@@ -1,0 +1,225 @@
+---
+title: "AGP data checking & processing"
+author: "Zhengxu"
+date: "2025-05-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Desktop/Link to Zhengxu/DataSet")
+library(vegan)
+library(phyloseq)
+library(tidyverse)
+library(patchwork)
+library(agricolae)
+library(FSA)
+library(readr)
+library(biomformat)
+```
+
+This script is for data checking and cleaning. The processed data will be saved in 'cleaned' folder.
+
+Read OTU and check.
+
+```{r}
+
+biom <- import_biom('~/Desktop/Link to Zhengxu/DataSet/extracted_files/otus/100nt/gg-13_8-97-percent/otu_table.biom')
+
+```
+
+Clean meta data. Some variable selection processes may apply.
+Following content last edited on 5/13/2025
+
+```{r}
+ids <- colnames(biom@otu_table)
+# ids <- as.character(ids$x)
+meta <- read_tsv("extracted_files/meta/ag-cleaned.txt")
+meta <- meta%>%filter(`#SampleID`%in%ids)
+# There are 17348 samples match ID.
+```
+
+Construct pet ownership variable based on Kate's programme.
+
+```{r}
+#Remove participants whose answer to cat or dog ownership is not provided.
+# c(CAT, DOG)
+# create variables for dog_o, cat_o. 
+# create variable for pet_0: 1, 0 for own or no own pet.
+# create only cat and only dog, cat_only, dog_only
+# create own both cat and dog, cat_and_dog
+meta <- meta%>%
+  mutate(dog_o = NA,
+         dog_o = ifelse(DOG%in%c("false","No"),0, ifelse(DOG%in%c("true","Yes"),1, dog_o)),
+         cat_o = NA,
+         cat_o = ifelse(CAT%in%c("false","No"),0, ifelse(CAT%in%c("true","Yes"),1, cat_o)),
+         dog_only = dog_o*(1-cat_o),
+         cat_only = cat_o*(1-dog_o),
+         cat_and_dog = cat_o*dog_o)%>%
+  filter(!is.na(cat_o))%>%
+  filter(!is.na(dog_o))
+# 16656 samples
+```
+
+Construct CVD variable
+
+```{r}
+meta <- meta%>%
+  mutate(cvd = NA,
+         cvd = ifelse(CARDIOVASCULAR_DISEASE=="Diagnosed by a medical professional (doctor, physician assistant)",1,ifelse(CARDIOVASCULAR_DISEASE=="I do not have this condition",0,cvd)))
+meta <- meta%>%filter(!is.na(cvd))
+# 11988 samples 
+```
+
+Pick covariates/confounders.
+
+```{r}
+meta <- meta%>%
+  filter(!AGE_CORRECTED%in%c("Unknown", "Unspecified"))%>%
+  mutate(age=as.numeric(AGE_CORRECTED),
+         bmi=as.numeric(BMI),
+         bmi_cat=as.numeric(BMI_CAT))%>%
+  filter(age>39)
+# modify sex variable
+meta <- meta%>%mutate(sex = ifelse(SEX%in%c('other','Not provided','unspecified','Unknown'),NA,SEX))
+# summary(test$bmi)
+#Remove participants whose age is NA.
+#Remove participants <40 years.
+#Remove participants whose bmi >220
+# 7095 samples
+#Select people only from USA.
+meta <- meta%>%filter(COUNTRY=="USA")
+
+# modify bmi of cat
+meta <- meta%>%
+  filter(bmi<220)
+
+meta <- meta%>%
+  filter(as.numeric(HEIGHT_CM)>=140)%>%
+  filter(as.numeric(HEIGHT_CM)<=200)%>%
+  filter(as.numeric(WEIGHT_KG)<=200)%>%
+  filter(as.numeric(WEIGHT_KG)>=35)
+```
+
+Make ordinal variables to be continuous variables, exercise, alcohol, smoking.
+
+```{r}
+
+# life style
+meta <- meta%>%
+  mutate(alcohol_frequency = ifelse(ALCOHOL_FREQUENCY%in%c('Not provided','Unspecified','Unknown'),NA,ALCOHOL_FREQUENCY),
+         smoking_frequency = ifelse(SMOKING_FREQUENCY%in%c('Not provided','Unspecified','Unknown'),NA,SMOKING_FREQUENCY),
+         exercise_frequency = ifelse(EXERCISE_FREQUENCY%in%c('Not provided','Unspecified','Unknown'),NA,EXERCISE_FREQUENCY),
+         level_of_education = ifelse(LEVEL_OF_EDUCATION%in%c('Not provided','Unspecified','Unknown'),NA,LEVEL_OF_EDUCATION))
+
+meta <- meta%>%mutate(diet_type=ifelse(DIET_TYPE%in%c('Unspecified','Not provided','Unknown'),NA,DIET_TYPE))
+
+#Sleep duration; categorize as adequate (6 hours or more) or inadequate (<6 hours)
+meta <- meta%>%
+  mutate(sleep_duration = ifelse(SLEEP_DURATION%in%c("Unknown","Unspecified"), NA, SLEEP_DURATION),
+         sleep_duration_regroup = ifelse(sleep_duration%in%c('Less than 5 hours', '5-6 hours'),
+                                        'Inadequate', ifelse(sleep_duration%in%c('6-7 hours', '7-8 hours', '8 or more hours'), 'Adequate', sleep_duration)))
+
+
+meta <- meta%>%
+  mutate(exercise_recode = do.call(fct_recode,c(list(exercise_frequency), setNames(c("Never", "Rarely (a few times/month)", "Occasionally (1-2 times/week)", "Regularly (3-5 times/week)","Daily"), c( 0, 3, 11, 16, 30)))),
+         exercise_recode = as.numeric(as.character(exercise_recode)),
+         smoking_recode = do.call(fct_recode,c(list(smoking_frequency), setNames(c("Never", "Rarely (a few times/month)", "Occasionally (1-2 times/week)", "Regularly (3-5 times/week)","Daily"), c( 0, 3, 11, 16, 30)))),
+         smoking_recode = as.numeric(as.character(smoking_recode)),
+         
+         smoker = ifelse(smoking_frequency%in%c("Rarely (a few times/month)", "Occasionally (1-2 times/week)", "Regularly (3-5 times/week)","Daily"),"Smoker",ifelse(smoking_frequency=="Never","Non-Smoker",NA)),
+         
+         education_recode = ifelse(level_of_education%in%c('Did not complete high school', 'High School or GED equilivant',"Associate's degree", "Bachelor's degree", "Some college or technical school" ),'Up to Undergrad',NA),
+         education_recode = ifelse(level_of_education%in%c("Graduate or Professional degree", "Some graduate school or professional"),'Some grad school or grad degree',education_recode))
+meta <- meta%>%
+  mutate(protein_intake = ifelse(DIET_TYPE%in%c("Omnivore","Omnivore but do not eat red meat","Vegetarian but eat seafood"),"yes",
+                                 ifelse(DIET_TYPE%in%c("Unknown","Unspecified"),NA,"no")))
+meta <- meta%>%
+  mutate(antibiotic_recent_take = ifelse(ANTIBIOTIC_HISTORY%in%c("I have not taken antibiotics in the past year."),"no",
+                                         ifelse(ANTIBIOTIC_HISTORY%in%c("Unspecified","Unknown"),NA,"yes")))
+```
+
+Then separate race into caucasian or not. Age under 55, 55-60, and over 60. Not pretty sure whether these are necessary. Following contents were edited on 05/20/2025.
+
+```{r}
+meta <- meta%>%mutate(
+  race_recode = ifelse(RACE%in%c("Unknown","Unspecified"),NA,RACE),
+  race_recode = ifelse(race_recode%in%c("Caucasian"),"Caucasian","Non-Caucasian"),
+  age_group55 = ifelse(age>54,"55orOlder","under55"),
+  age_group60 = ifelse(age>59,"60orOlder","under60"),
+  age_group65 = ifelse(age>64,"65orOlder","under65")
+)
+```
+
+Update: 06092025
+The BMI has some problems, due to some problem in weight and height.
+Based on the paper about Data Publication, some thresholds are set to exclude samples
+with invalid weight and height.
+
+Ranges are: 140-200cm for height, 35-200kg for weight
+
+```{r}
+meta <- meta%>%
+  mutate(age_group_in_4 = ifelse(age<50,"40 to 49",
+                                 ifelse(age<60,"50 to 59",
+                                        ifelse(age<70,"60 to 69", "70+"))),
+         pet_status = "No Pet",
+         pet_status = ifelse(cat_only==1,"Cat Only",pet_status),
+         pet_status = ifelse(dog_only==1,"Dog Only",pet_status),
+         pet_status = ifelse(cat_and_dog==1,"Cat and Dog",pet_status),
+         no_pet = 1-cat_only-dog_only-cat_and_dog)
+```
+
+Check about the distribution of demography and some thing.
+```{r}
+meta <- meta%>%
+  mutate(alcohol_recode = do.call(fct_recode,c(list(alcohol_frequency), setNames(c("Never", "Rarely (a few times/month)", "Occasionally (1-2 times/week)", "Regularly (3-5 times/week)","Daily"), c( 0, 3, 11, 16, 30)))))
+meta <- meta%>%filter(!is.na(sex))
+colnames(meta)[1] <- "ID"
+
+meta <- meta%>%filter(!is.na(sleep_duration_regroup),
+                      # !is.na(sex),
+                      !is.na(smoking_frequency),
+                      !is.na(exercise_frequency),
+                      !is.na(alcohol_frequency),
+                      !is.na(education_recode),
+                      !is.na(protein_intake),
+                      !is.na(antibiotic_recent_take))
+meta <- meta%>%mutate(cvd = as.factor(cvd))
+```
+
+
+```{r}
+depth_raw <- data.frame(cbind(colnames(biom@otu_table),apply(biom@otu_table,2, sum)))
+depth_raw$X2 <- as.numeric(depth_raw$X2)
+
+meta <- meta%>%
+  filter(ID%in%depth_raw$X1[depth_raw$X2>=1250])
+
+biom@otu_table <- otu_table(subset(biom@otu_table,select = meta$ID))
+
+# write.table(meta,"/N/project/Watson_AGP/Zhengxu/DataSet/cleaned/meta/meta_07202026.txt")
+ind <- which(apply(biom@otu_table,1,function(x){
+  mean(x>0)
+})>=0.1)
+biom@otu_table <- biom@otu_table[ind,]
+
+biom@tax_table <- biom@tax_table[taxa_names(biom@otu_table),]
+# save(biom,file = "/N/u/liaozh/Quartz/Desktop/Link to Zhengxu/DataSet/cleaned/biom/biom_07202026.Rdata")
+```
+
+
+```{r}
+library(table1)
+table1(~pet_status+ age+ age_group55  + sleep_duration_regroup + sex + race_recode + smoking_recode + smoker+ exercise_recode + alcohol_recode + education_recode + bmi + protein_intake + antibiotic_recent_take | as.factor(cvd),data = meta)
+```
+
+
+
+
+
+
+
+
+
+
